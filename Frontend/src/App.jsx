@@ -1,289 +1,169 @@
-// Frontend/src/App.jsx
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import axios from 'axios';
-import './App.css'; // Import the CSS file
+import ReactMarkdown from 'react-markdown';
+import './App.css'; 
 
-// --- IMPORT YOUR PIXEL ART IMAGE HERE ---
-import scalesPixel from './assets/Scales.png'; // Updated to use your Scales.png file
-// -----------------------------------------
+import heroBg from './assets/hero-bg.png';
 
 function App() {
   const [inputText, setInputText] = useState('');
-  const [selectedPrompt, setSelectedPrompt] = useState('detailed_analysis'); // Default prompt type
-  const [analysisResult, setAnalysisResult] = useState(null);
+  const [chatHistory, setChatHistory] = useState([
+    { role: 'model', content: "Welcome to LeDorian. How can I assist you with your legal documents today? You can ask a legal question, paste text, or use the paperclip icon below to upload a PDF/DOCX for context." }
+  ]);
+  const [documentContext, setDocumentContext] = useState(null);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
-  const [selectedFile, setSelectedFile] = useState(null);
+  const [isUploading, setIsUploading] = useState(false);
+  
+  const chatEndRef = useRef(null);
 
-  // IMPORTANT: Ensure this URL matches your FastAPI server's address and port
   const API_BASE_URL = 'http://127.0.0.1:8000';
 
-  const handleTextAnalysis = useCallback(async () => {
-    setError(null);
+  const scrollToBottom = () => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [chatHistory, loading]);
+
+  const handleSendMessage = useCallback(async (e) => {
+    if (e) e.preventDefault();
+    if (!inputText.trim()) return;
+
+    const userMessage = inputText;
+    setInputText('');
+    
+    // Add user message to history immediately for responsive UI
+    const updatedHistory = [...chatHistory, { role: 'user', content: userMessage }];
+    setChatHistory(updatedHistory);
+    
     setLoading(true);
-    setAnalysisResult(null); // Clear previous results
+
     try {
-      // Ensure this endpoint matches your FastAPI's @app.post("/analyze-document-text")
-      const response = await axios.post(`${API_BASE_URL}/analyze-document-text`, {
-        text: inputText,
-        prompt_type: selectedPrompt,
+      const response = await axios.post(`${API_BASE_URL}/chat`, {
+        message: userMessage,
+        // We exclude the hardcoded welcome message to save tokens
+        history: chatHistory.slice(1).map(msg => ({ 
+          role: msg.role === 'model' ? 'model' : 'user', 
+          content: msg.content 
+        })),
+        document_context: documentContext
       });
-      setAnalysisResult(response.data);
+
+      setChatHistory(prev => [...prev, { role: 'model', content: response.data.reply }]);
+      
     } catch (err) {
-      console.error('Error during text analysis:', err);
-      setError(err.response?.data?.detail || 'An unexpected error occurred during text analysis.');
+      console.error('Error during chat:', err);
+      setChatHistory(prev => [...prev, { role: 'model', content: `**Error:** ${err.response?.data?.detail || 'An unexpected error occurred communicating with LeDorian.'}` }]);
     } finally {
       setLoading(false);
     }
-  }, [inputText, selectedPrompt]);
+  }, [inputText, chatHistory, documentContext]);
 
-  const handleFileChange = useCallback((event) => {
-    setSelectedFile(event.target.files[0]);
-    setError(null); // Clear any previous file-related errors
-  }, []);
+  const handleFileUpload = useCallback(async (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
 
-  const handleFileUpload = useCallback(async () => {
-    if (!selectedFile) {
-      setError('Please select a file to upload.');
-      return;
-    }
-
-    setError(null);
-    setLoading(true);
-    setAnalysisResult(null); // Clear previous results
+    setIsUploading(true);
+    setChatHistory(prev => [...prev, { role: 'user', content: `*(Uploading document: ${file.name}...)*` }]);
 
     const formData = new FormData();
-    formData.append('file', selectedFile);
+    formData.append('file', file);
 
     try {
-      // Ensure this endpoint matches your FastAPI's @app.post("/upload-and-analyze")
-      const response = await axios.post(`${API_BASE_URL}/upload-and-analyze`, formData, {
-        headers: {
-          'Content-Type': 'multipart/form-data',
-        },
+      const response = await axios.post(`${API_BASE_URL}/upload-context`, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
       });
-      setAnalysisResult(response.data);
+      
+      setDocumentContext(response.data.extracted_text);
+      setChatHistory(prev => [...prev, { 
+        role: 'model', 
+        content: `I have successfully analyzed **${response.data.filename}**. What specific clauses, risks, or jargon would you like me to identify for you?` 
+      }]);
     } catch (err) {
-      console.error('Error during file upload and analysis:', err);
-      setError(err.response?.data?.detail || 'An unexpected error occurred during file upload and analysis.');
+      console.error('Error during file upload:', err);
+      setChatHistory(prev => [...prev, { 
+        role: 'model', 
+        content: `**Error uploading file:** ${err.response?.data?.detail || 'An unexpected error occurred.'}` 
+      }]);
     } finally {
-      setLoading(false);
+      setIsUploading(false);
     }
-  }, [selectedFile]);
+    
+    // reset file input
+    event.target.value = null;
+  }, []);
+
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSendMessage();
+    }
+  };
 
   return (
     <div className="app-container">
-      {/* Removed images from top of the title */}
-      <h1>LeDorian - The Legal Doc Advisor</h1>
+      {/* Compact Premium Hero Section */}
+      <header className="hero-section compact" style={{ backgroundImage: `url(${heroBg})` }}>
+        <div className="hero-overlay"></div>
+        <div className="hero-content">
+          <h1 className="hero-title">Le<span className="accent">Dorian</span></h1>
+        </div>
+      </header>
 
-      <div className="input-section">
-        <textarea
-          className="text-input"
-          placeholder="Paste your legal document text here..."
-          value={inputText}
-          onChange={(e) => setInputText(e.target.value)}
-          rows="10"
-        ></textarea>
-        <div className="controls">
-          <select
-            value={selectedPrompt}
-            onChange={(e) => setSelectedPrompt(e.target.value)}
-            className="prompt-select"
-          >
-            <option value="risk_identification">Risk Identification</option>
-            <option value="detailed_analysis">Detailed Analysis</option>
-            <option value="jargon_simplification">Jargon Simplification</option>
-            <option value="overall_summary">Overall Summary</option>
-          </select>
-          <button onClick={handleTextAnalysis} disabled={loading || !inputText.trim()} className="analyze-button">
-            {loading ? (
-              <>Analyzing... <span className="spinner"></span></>
-            ) : (
-              'Analyze Text'
+      <main className="chat-interface">
+        <div className="premium-card chat-card">
+          <div className="chat-window">
+            {chatHistory.map((msg, index) => (
+              <div key={index} className={`message-wrapper ${msg.role}`}>
+                {msg.role === 'model' && <div className="avatar model-avatar">⚖️</div>}
+                <div className={`message-bubble ${msg.role}`}>
+                  <ReactMarkdown>{msg.content}</ReactMarkdown>
+                </div>
+                {msg.role === 'user' && <div className="avatar user-avatar">👤</div>}
+              </div>
+            ))}
+            
+            {loading && (
+              <div className="message-wrapper model">
+                <div className="avatar model-avatar">⚖️</div>
+                <div className="message-bubble model typing-indicator">
+                  <span></span><span></span><span></span>
+                </div>
+              </div>
             )}
-          </button>
+            <div ref={chatEndRef} />
+          </div>
+
+          <div className="chat-input-area">
+            <label className="file-upload-btn" title="Upload Context Document (.pdf, .docx)">
+              📋
+              <input type="file" onChange={handleFileUpload} accept=".pdf,.docx" disabled={isUploading || loading} />
+            </label>
+            
+            <textarea
+              className="chat-input"
+              placeholder="Ask LeDorian a question or paste text to analyze..."
+              value={inputText}
+              onChange={(e) => setInputText(e.target.value)}
+              onKeyDown={handleKeyDown}
+              disabled={loading || isUploading}
+              rows="1"
+            />
+            
+            <button 
+              className="send-btn" 
+              onClick={handleSendMessage} 
+              disabled={!inputText.trim() || loading || isUploading}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="22" y1="2" x2="11" y2="13"></line>
+                <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+              </svg>
+            </button>
+          </div>
         </div>
-      </div>
-
-      <div className="file-upload-section">
-        <input type="file" onChange={handleFileChange} accept=".pdf,.docx" className="file-input" />
-        {selectedFile && <span className="file-name-display">{selectedFile.name}</span>}
-        <button onClick={handleFileUpload} disabled={loading || !selectedFile} className="upload-button">
-          {loading ? (
-            <>Uploading... <span className="spinner"></span></>
-            ) : (
-              'Upload & Analyze Document'
-            )}
-        </button>
-      </div>
-
-      {error && <div className="error-message">Error: {error}</div>}
-
-      {/* Empty State / Getting Started Message */}
-      {!loading && !analysisResult && !error && (
-        <div className="initial-message">
-          <h2>Welcome to LeDorian!</h2>
-          <p>Paste your legal document text above or upload a PDF/DOCX file to begin the analysis.</p>
-          <p>Choose a prompt type to get started:</p>
-          <ul>
-            <li><strong>Risk Identification:</strong> Quickly identify potential risks.</li>
-            <li><strong>Detailed Analysis:</strong> Get a comprehensive breakdown of the document.</li>
-            <li><strong>Jargon Simplification:</strong> Understand complex legal terms in plain language.</li>
-            <li><strong>Overall Summary:</strong> Get a concise overview of the document's key points.</li>
-          </ul>
-          {/* IMAGE: Only one image remains, at the bottom within the initial message */}
-          <img src={scalesPixel} alt="Pixel Art Scales" className="decorative-pixel-art decorative-pixel-art-initial-message" />
-        </div>
-      )}
-
-      {analysisResult && (
-        <div className="results-section analysis-results-box">
-          <h2>Analysis Results:</h2>
-
-          {/* Always display Risk Level if available */}
-          {analysisResult.risk_level && (
-            <div className="result-item">
-              <h3>Risk Level: <span className={`risk-level ${analysisResult.risk_level.toLowerCase()}`}>{analysisResult.risk_level}</span></h3>
-            </div>
-          )}
-
-          {/* Always display Simplified Explanation if available */}
-          {analysisResult.simplified_explanation && (
-            <div className="result-item">
-              <h3>Simplified Explanation:</h3>
-              <p>{analysisResult.simplified_explanation}</p>
-            </div>
-          )}
-
-          {/* Inter-Clause Dependencies - Common to both Risk and Detailed */}
-          {analysisResult.inter_clause_dependencies && analysisResult.inter_clause_dependencies.length > 0 && (
-            <div className="result-item">
-              <h3>Inter-Clause Dependencies:</h3>
-              <ul>
-                {analysisResult.inter_clause_dependencies.map((dep, index) => (
-                  <li key={index}>
-                    <strong>Clause:</strong> {dep.clause_id} - <strong>Type:</strong> {dep.dependency_type} - <strong>Description:</strong> {dep.description}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-
-          {/* Detailed Analysis Specific Fields */}
-          {analysisResult.vague_terms && analysisResult.vague_terms.length > 0 && (
-            <div className="result-item">
-              <h3>Vague Terms:</h3>
-              <ul>
-                {analysisResult.vague_terms.map((term, index) => (
-                  <li key={index}>
-                    <strong>Term:</strong> "{term.term}" - <strong>Explanation:</strong> {term.explanation}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-
-          {analysisResult.biased_language && analysisResult.biased_language.length > 0 && (
-            <div className="result-item">
-              <h3>Biased Language:</h3>
-              <ul>
-                {analysisResult.biased_language.map((bias, index) => (
-                  <li key={index}>
-                    <strong>Phrase:</strong> "{bias.phrase}" - <strong>Explanation:</strong> {bias.explanation}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-
-          {analysisResult.red_flags && analysisResult.red_flags.length > 0 && (
-            <div className="result-item">
-              <h3>Red Flags:</h3>
-              <ul>
-                {analysisResult.red_flags.map((flag, index) => (
-                  <li key={index}>
-                    <strong>Type:</strong> {flag.type} - <strong>Description:</strong> {flag.description} - <strong>Original Text Snippet:</strong> "{flag.original_text_snippet}"
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-
-          {analysisResult.compounding_risks && analysisResult.compounding_risks.length > 0 && (
-            <div className="result-item">
-              <h3>Compounding Risks:</h3>
-              <ul>
-                {analysisResult.compounding_risks.map((risk, index) => (
-                  <li key={index}>
-                    <strong>Clauses Involved:</strong> {risk.clauses_involved.join(', ')} - <strong>Combined Risk Description:</strong> {risk.combined_risk_description}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-
-          {analysisResult.structural_elements && analysisResult.structural_elements.length > 0 && (
-            <div className="result-item">
-              <h3>Structural Elements:</h3>
-              <ul>
-                {analysisResult.structural_elements.map((elem, index) => (
-                  <li key={index}>
-                    <strong>Type:</strong> {elem.type} - <strong>Description:</strong> {elem.description}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-
-          {analysisResult.external_references && analysisResult.external_references.length > 0 && (
-            <div className="result-item">
-              <h3>External References:</h3>
-              <ul>
-                {analysisResult.external_references.map((ref, index) => (
-                  <li key={index}>
-                    <strong>Reference:</strong> {ref.reference} - <strong>Description:</strong> {ref.description}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-
-          {analysisResult.exception_clauses && analysisResult.exception_clauses.length > 0 && (
-            <div className="result-item">
-              <h3>Exception Clauses:</h3>
-              <ul>
-                {analysisResult.exception_clauses.map((clause, index) => (
-                  <li key={index}>
-                    <strong>Clause:</strong> {clause.clause} - <strong>Description:</strong> {clause.description}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-
-          {analysisResult.jurisdictional_risks && analysisResult.jurisdictional_risks.length > 0 && (
-            <div className="result-item">
-              <h3>Jurisdictional Risks:</h3>
-              <ul>
-                {analysisResult.jurisdictional_risks.map((risk, index) => (
-                  <li key={index}>
-                    <strong>Jurisdiction:</strong> {risk.jurisdiction} - <strong>Risk Description:</strong> {risk.risk_description} - <strong>Applicability:</strong> {risk.applicability}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-
-          {/* Fallback for other prompt types that might return simpler JSON or unhandled structures */}
-          {Object.keys(analysisResult).length > 0 && !analysisResult.risk_level && !analysisResult.simplified_explanation && (
-            <div className="result-item">
-              <h3>Raw Output (for unhandled structures or simple responses):</h3>
-              <pre>{JSON.stringify(analysisResult, null, 2)}</pre>
-            </div>
-          )}
-
-        </div>
-      )}
+      </main>
     </div>
   );
 }

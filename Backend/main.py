@@ -1,20 +1,19 @@
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File
-from pydantic import BaseModel, ValidationError # Import ValidationError
-import re
 import os
-from typing import List, Dict, Any, Union # Import Union
+from dotenv import load_dotenv
+# Load environment variables FIRST before anything else dependencies
+load_dotenv()
+
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File
+from pydantic import BaseModel
+from typing import List, Dict, Any, Optional
 import logging
-import io # Added for file handling
+import io
 import google.generativeai as genai
-import json # JSON responses from LLM
-from PyPDF2 import PdfReader # For PDF processing
-import docx # For DOCX processing
+from PyPDF2 import PdfReader
+import docx
 
-# Import CORSMiddleware
 from fastapi.middleware.cors import CORSMiddleware
-
-# Import PROMPT_TEMPLATES from the new prompts.py file
-from prompts import PROMPT_TEMPLATES
+from prompts import SYSTEM_INSTRUCTION
 
 # --- Configure Logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -26,158 +25,54 @@ LLM_MODEL_NAME = "gemini-2.5-flash"
 
 # --- FastAPI App Initialization ---
 app = FastAPI(
-    title="Legal Document Risk Analysis Backend",
-    description="Processes legal documents, interacts with LLMs for risk analysis, and structures data for frontend visualization.",
-    version="1.0.0"
+    title="LeDorian Conversational Backend",
+    description="Stateful chat backend for processing legal documents with Gemini AI.",
+    version="2.0.0"
 )
 
-# --- CORS Configuration ---
-# Add this block after app = FastAPI(...)
 origins = [
     "http://localhost",
     "http://localhost:5173",  # Your frontend's address
-    # Add other origins if your frontend might run on different ports/domains
 ]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],  # Allows all methods (GET, POST, PUT, DELETE, OPTIONS, etc.)
-    allow_headers=["*"],  # Allows all headers
+    allow_methods=["*"], 
+    allow_headers=["*"],
 )
 
 # --- Models for Request and Response ---
+class ChatMessage(BaseModel):
+    role: str # "user" or "model"
+    content: str
 
-# UPDATED: DocumentText now includes prompt_type
-class DocumentText(BaseModel):
-    text: str
-    prompt_type: str = "risk_identification" # Default value
+class ChatRequest(BaseModel):
+    message: str
+    history: List[ChatMessage] = []
+    document_context: Optional[str] = None
 
-# This model matches the original 'risk_identification' output structure
-class RiskAnalysisResult(BaseModel):
-    risk_level: str
-    simplified_explanation: str
-    inter_clause_dependencies: List[Dict[str, str]]
+class UploadResponse(BaseModel):
+    extracted_text: str
+    filename: str
 
-# NEW: This model matches the 'detailed_analysis' output structure
-class DetailedAnalysisResult(BaseModel):
-    risk_level: str
-    simplified_explanation: str
-    inter_clause_dependencies: List[Dict[str, str]]
-    vague_terms: List[Dict[str, str]]
-    biased_language: List[Dict[str, str]]
-    red_flags: List[Dict[str, str]]
-    compounding_risks: List[Dict[str, Any]]
-    structural_elements: List[Dict[str, str]]
-    external_references: List[Dict[str, str]]
-    exception_clauses: List[Dict[str, str]]
-    jurisdictional_risks: List[Dict[str, Any]] # Adjusted to Any for internal dict values
-
-# The main response model for /analyze-document-text endpoint will be Dict[str, Any]
-# to allow for dynamic JSON outputs based on prompt_type.
-# Specific validation will happen inside the endpoint logic.
-# You could also use Union[RiskAnalysisResult, DetailedAnalysisResult, ... etc.]
-# if the output structures are somewhat distinct but manageable within a single union.
+class ChatResponse(BaseModel):
+    reply: str
 
 # --- LLM and Prompt Configuration ---
 genai.configure(api_key=LLM_API_KEY)
-model = genai.GenerativeModel(LLM_MODEL_NAME)
-
-# --- Helper Function for LLM Interaction ---
-async def generate_llm_response(prompt_template_str: str, chunk: str, **kwargs) -> str:
-    """
-    Generates a response from the LLM based on a prompt template and a text chunk.
-    Handles placeholder replacement and ensures JSON response mime type.
-    """
-    formatted_prompt = prompt_template_str.replace("{{chunk}}", chunk)
-
-    # Handle other specific placeholders if the chosen prompt uses them
-    for key, value in kwargs.items():
-        placeholder = f"{{{{{key}}}}}"
-        formatted_prompt = formatted_prompt.replace(placeholder, value)
-
-    try:
-        response = await model.generate_content_async(
-            formatted_prompt,
-            generation_config=genai.GenerationConfig(response_mime_type="application/json")
-        )
-        return response.text
-    except Exception as e:
-        logger.error(f"LLM generation error: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"LLM generation failed: {e}")
+model = genai.GenerativeModel(
+    model_name=LLM_MODEL_NAME,
+    system_instruction=SYSTEM_INSTRUCTION
+)
 
 # --- API Endpoints ---
-
-# UPDATED: response_model is now Dict[str, Any] for flexibility
-@app.post("/analyze-document-text", response_model=Dict[str, Any])
-async def analyze_document_text(doc_text: DocumentText):
+@app.post("/upload-context", response_model=UploadResponse)
+async def upload_context(file: UploadFile = File(...)):
     """
-    Analyzes provided legal text based on the specified prompt type.
-    """
-    logger.info(f"Received request for text analysis. Prompt type: {doc_text.prompt_type}, Text length: {len(doc_text.text)}")
-
-    if doc_text.prompt_type not in PROMPT_TEMPLATES:
-        raise HTTPException(status_code=400, detail=f"Invalid prompt_type: '{doc_text.prompt_type}'. Available types are: {', '.join(PROMPT_TEMPLATES.keys())}")
-
-    # Use the first prompt in the selected category.
-    # For more granular control, you might need an index or sub-type in the future.
-    prompt_template_str = PROMPT_TEMPLATES[doc_text.prompt_type][0]
-
-    try:
-        # Pass the text to the LLM helper.
-        # For prompts requiring more specific parameters (e.g., clause_a_text),
-        # you would need to add them to DocumentText model and pass them here.
-        # For 'detailed_analysis', only 'chunk' (doc_text.text) is used.
-        llm_output = await generate_llm_response(prompt_template_str, doc_text.text)
-        logger.info(f"LLM raw output (first 500 chars): {llm_output[:500]}...")
-
-        parsed_llm_output = json.loads(llm_output)
-
-        # Validate and return the output based on prompt_type
-        if doc_text.prompt_type == "detailed_analysis":
-            try:
-                # Validate against the comprehensive DetailedAnalysisResult model
-                validated_output = DetailedAnalysisResult(**parsed_llm_output)
-                return validated_output.dict()
-            except ValidationError as e:
-                logger.error(f"Pydantic validation error for 'detailed_analysis' output: {e}", exc_info=True)
-                raise HTTPException(status_code=500, detail=f"LLM output for 'detailed_analysis' failed validation: {e.errors()}")
-        elif doc_text.prompt_type == "risk_identification":
-            try:
-                # Validate against the simpler RiskAnalysisResult model
-                validated_output = RiskAnalysisResult(**parsed_llm_output)
-                # You might want to add 'original_text_snippet' and 'color_code' here
-                # if you intend for all outputs to conform to a similar 'FullAnalysisResponse' structure.
-                # For now, it returns the direct RiskAnalysisResult dict.
-                return validated_output.dict()
-            except ValidationError as e:
-                logger.error(f"Pydantic validation error for 'risk_identification' output: {e}", exc_info=True)
-                raise HTTPException(status_code=500, detail=f"LLM output for 'risk_identification' failed validation: {e.errors()}")
-        # Add similar elif blocks for other prompt types (e.g., 'jargon_simplification', 'overall_summary')
-        # if they have specific Pydantic models or require custom processing.
-        else:
-            # For other prompt types, if no specific Pydantic model is defined,
-            # return the raw parsed JSON.
-            logger.info(f"Returning raw JSON for prompt_type: {doc_text.prompt_type}")
-            return parsed_llm_output
-
-    except json.JSONDecodeError as e:
-        logger.error(f"JSON decoding error from LLM. Raw LLM output: {llm_output}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"LLM did not return valid JSON: {e}")
-    except HTTPException as e:
-        # Re-raise FastAPI HTTPExceptions directly
-        raise e
-    except Exception as e:
-        logger.error(f"An unexpected error occurred during analysis: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Analysis failed: {e}")
-
-# UPDATED: response_model is now Dict[str, Any] for consistency with /analyze-document-text
-@app.post("/upload-and-analyze", response_model=Dict[str, Any])
-async def upload_and_analyze_document(file: UploadFile = File(...)):
-    """
-    Receives a document file (PDF or DOCX), extracts text, and performs analysis.
-    Defaults to 'detailed_analysis' for file uploads.
+    Receives a document file (PDF or DOCX), extracts text, and returns the full text 
+    back to the client. This text will then be kept in the frontend and passed into chat requests.
     """
     extracted_text = ""
     try:
@@ -186,22 +81,59 @@ async def upload_and_analyze_document(file: UploadFile = File(...)):
             logger.info(f"Processing PDF file: {file.filename}")
             reader = PdfReader(io.BytesIO(file_content))
             for page in reader.pages:
-                extracted_text += page.extract_text() + "\n" # Use \n for newline
+                extracted_text += page.extract_text() + "\n"
         elif file.filename.endswith(".docx"):
             logger.info(f"Processing DOCX file: {file.filename}")
             document = docx.Document(io.BytesIO(file_content))
             for paragraph in document.paragraphs:
-                extracted_text += paragraph.text + "\n" # Use \n for newline
+                extracted_text += paragraph.text + "\n"
         else:
             raise HTTPException(status_code=400, detail="Unsupported file type. Please upload PDF or DOCX.")
 
-        # For file uploads, automatically use the 'detailed_analysis' prompt type.
-        # You could add a query parameter to allow the user to select this from the UI/request.
-        document_for_analysis = DocumentText(text=extracted_text, prompt_type="detailed_analysis")
-        return await analyze_document_text(document_for_analysis)
+        return UploadResponse(extracted_text=extracted_text, filename=file.filename)
 
     except HTTPException as e:
         raise e
     except Exception as e:
         logger.error(f"Error processing uploaded file: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to process file: {e}")
+
+@app.post("/chat", response_model=ChatResponse)
+async def chat_endpoint(request: ChatRequest):
+    """
+    Takes a new user message, historical conversation context, and the document itself,
+    and returns LeDorian's conversational reply.
+    """
+    try:
+        # 1. Rebuild History for Gemini SDK
+        # Gemini expects history in the format: [{"role": "user", "parts": ["hello"]}, {"role": "model", "parts": ["hi"]}]
+        formatted_history = []
+        for msg in request.history:
+            formatted_history.append({
+                "role": msg.role,
+                "parts": [msg.content]
+            })
+        
+        # 2. Start Chat Session
+        chat = model.start_chat(history=formatted_history)
+
+        # 3. Augment the user message if it's the very first message with a document
+        user_message = request.message
+        if request.document_context and len(request.history) == 0:
+            logger.info("Injecting massive document context into the first message.")
+            user_message = (
+                f"--- DOCUMENT CONTEXT FOR THIS CONVERSATION ---\n"
+                f"\"\"\"{request.document_context}\"\"\"\n"
+                f"--------------------------------------------\n\n"
+                f"USER QUESTION: {request.message}"
+            )
+
+        # 4. Generate Response
+        logger.info(f"Sending message to LLM. History length: {len(request.history)}. Message length: {len(user_message)}")
+        response = await chat.send_message_async(user_message)
+        
+        return ChatResponse(reply=response.text)
+
+    except Exception as e:
+        logger.error(f"Error during chat generation: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"LLM Generation failed: {str(e)}")

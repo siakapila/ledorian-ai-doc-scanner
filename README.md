@@ -16,6 +16,18 @@
 
 ---
 
+## Contributions
+
+This project was initially developed as part of a team effort.
+
+My contributions include:
+- Frontend UI improvements and styling  
+- Backend API restructuring and integration  
+- Enhancing document processing workflow  
+- Preparing project for independent deployment  
+
+---
+
 ## 🛠 Tech Stack
 
 ### Frontend
